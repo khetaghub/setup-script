@@ -500,4 +500,30 @@ if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
 	}
 }
 
+# -----------------------------------------------------------------------------
+# Приложение: WhatsApp
+# -----------------------------------------------------------------------------
+
+$packageId = "9NKSQGP7F2NH"
+$installedName = "WhatsApp"
+
+if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
+    Write-Host "$installedName уже установлен."
+} else {
+    Write-Host "Установка $installedName..."
+
+    winget install `
+      --id $packageId `
+      --exact `
+      --source msstore `
+      --accept-package-agreements `
+      --accept-source-agreements
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Ошибка установки $installedName. Код завершения winget: $LASTEXITCODE. Пропускаем."
+    } else {
+        Write-Host "$installedName установлен успешно."
+    }
+}
+
 Write-Host "`nУстановка завершена.`n"
