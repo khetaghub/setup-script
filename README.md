@@ -17,6 +17,16 @@
 
 ### Рекомендуемый способ
 
+Запустить установку одной командой в PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/khetaghub/windows-setup-script/f30ddd7/install.ps1 | iex
+```
+
+PowerShell нужно открыть от имени администратора.
+
+### Локальный запуск
+
 Запустить файл:
 
 ```text
@@ -38,6 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-script.ps1
 ## Состав
 
 ```text
+install.ps1        # скачивает основной скрипт и запускает его с правами администратора
 setup.bat          # точка входа; запрашивает права администратора и запускает PowerShell-скрипт
 setup-script.ps1   # основной PowerShell-скрипт настройки и установки приложений
 README.md          # описание проекта и инструкция по запуску
