@@ -15,6 +15,16 @@
 
 ## Запуск
 
+### One-line installer
+
+Открой PowerShell и выполни:
+
+```powershell
+irm https://raw.githubusercontent.com/khetaghub/windows-setup-script/develop/setup.ps1 | iex
+```
+
+Installer автоматически установит Git, если он не найден, затем клонирует репозиторий в текущую папку PowerShell и запускает `setup.bat`.
+
 ### Рекомендуемый способ
 
 Запустить файл:
@@ -39,6 +49,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-script.ps1
 
 ```text
 setup.bat          # точка входа; запрашивает права администратора и запускает PowerShell-скрипт
+setup.ps1          # one-line bootstrap для запуска через irm ... | iex
 setup-script.ps1   # основной PowerShell-скрипт настройки и установки приложений
 README.md          # описание проекта и инструкция по запуску
 ```
