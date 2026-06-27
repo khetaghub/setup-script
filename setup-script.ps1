@@ -1,82 +1,95 @@
 ﻿# -----------------------------------------------------------------------------
-# Проверка окружения
+# Красивый вывод и кодировка
 # -----------------------------------------------------------------------------
 
-Write-Host "Проверка окружения...`n"
+$ErrorActionPreference = "Stop"
 
-# Проверка запуска от администратора
-$isAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
-if (-not $isAdmin) {
-    Write-Host "❌ Скрипт нужно запускать от имени администратора!" -ForegroundColor Red
+$script:TotalApps = 0
+$script:CurrentApp = 0
+$script:InstalledApps = 0
+$script:SkippedApps = 0
+$script:FailedApps = 0
+$script:LogDir = Join-Path $PSScriptRoot "logs"
+$script:LogFile = Join-Path $script:LogDir ("setup-winget-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+
+function Write-Section {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Title
+    )
+
     Write-Host ""
-    Write-Host "Решение:" -ForegroundColor Yellow
-    Write-Host "ПКМ по setup.bat → 'Запуск от имени администратора'"
-    Write-Host ""
-
-    exit
+    Write-Host "== $Title ==" -ForegroundColor Cyan
 }
 
-# Проверка наличия winget
-$wingetExists = Get-Command winget -ErrorAction SilentlyContinue
-if (-not $wingetExists) {
-    Write-Host "❌ winget не найден или не доступен в PATH!" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Попробуй:"
-    Write-Host "- установить App Installer из Microsoft Store"
-    Write-Host "- перезапустить PowerShell"
-    Write-Host ""
+function Write-Status {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("OK", "SKIP", "WARN", "INFO")]
+        [string] $Type,
 
-    exit
+        [Parameter(Mandatory = $true)]
+        [string] $Message
+    )
+
+    $color = switch ($Type) {
+        "OK" { "Green" }
+        "SKIP" { "DarkGray" }
+        "WARN" { "Yellow" }
+        default { "Gray" }
+    }
+
+    Write-Host ("[{0}] {1}" -f $Type, $Message) -ForegroundColor $color
 }
 
-# -----------------------------------------------------------------------------
-# Настройки Проводника: показывать расширения и скрытые файлы
-# -----------------------------------------------------------------------------
+function Invoke-WingetQuiet {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments
+    )
 
-Write-Host "Настройка Проводника Windows..."
+    "" | Out-File -FilePath $script:LogFile -Append -Encoding utf8
+    "winget $($Arguments -join ' ')" | Out-File -FilePath $script:LogFile -Append -Encoding utf8
 
-$explorerAdvanced = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $output = & winget @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
 
-# Показывать скрытые файлы и папки
-Set-ItemProperty -Path $explorerAdvanced -Name Hidden -Value 1
+    $output | Out-File -FilePath $script:LogFile -Append -Encoding utf8
 
-# Показывать расширения файлов
-Set-ItemProperty -Path $explorerAdvanced -Name HideFileExt -Value 0
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Output = $output
+    }
+}
 
-# Перезапуск Проводника, чтобы настройки применились сразу
-Stop-Process -Name explorer -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
-Start-Process explorer.exe
-
-Write-Host "Настройки Проводника применены.`n"
-
-# -----------------------------------------------------------------------------
-# Вспомогательные функции
-# -----------------------------------------------------------------------------
-
-# Функция проверяющая, установлено ли приложение
 function Test-AppInstalled {
     param(
         [Parameter(Mandatory = $true)]
         [string] $PackageId,
 
         [Parameter(Mandatory = $false)]
-        [string] $InstalledName
+        [string] $InstalledName,
+
+        [Parameter(Mandatory = $false)]
+        [string] $Source = "winget"
     )
 
-    winget list --id $PackageId --exact --source winget | Out-Null
+    $args = @("list", "--id", $PackageId, "--exact", "--source", $Source, "--disable-interactivity")
+    $result = Invoke-WingetQuiet -Arguments $args
 
-    if ($LASTEXITCODE -eq 0) {
+    if ($result.ExitCode -eq 0) {
         return $true
     }
 
     if (-not [string]::IsNullOrWhiteSpace($InstalledName)) {
-        winget list --name $InstalledName | Out-Null
+        $args = @("list", "--name", $InstalledName, "--disable-interactivity")
+        $result = Invoke-WingetQuiet -Arguments $args
 
-        if ($LASTEXITCODE -eq 0) {
+        if ($result.ExitCode -eq 0) {
             return $true
         }
     }
@@ -84,420 +97,255 @@ function Test-AppInstalled {
     return $false
 }
 
-# -----------------------------------------------------------------------------
-# Приложение: Bitwarden
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/b/Bitwarden/Bitwarden
-# -----------------------------------------------------------------------------
+function Install-App {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable] $App
+    )
 
-$packageId = "Bitwarden.Bitwarden"
-$version = "2026.3.1"
-$installedName = "Bitwarden"
+    $script:CurrentApp++
 
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
+    $name = $App.Name
+    $source = if ($App.Source) { $App.Source } else { "winget" }
+    $versionText = if ($App.Version) { " $($App.Version)" } else { "" }
+    $prefix = "[{0}/{1}]" -f $script:CurrentApp, $script:TotalApps
 
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type nullsoft `
-      --architecture x64 `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent `
-      --custom "/allusers"
+    Write-Host ""
+    Write-Host "$prefix $name$versionText" -ForegroundColor White
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код завершения winget: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if (Test-AppInstalled -PackageId $App.Id -InstalledName $name -Source $source) {
+        $script:SkippedApps++
+        Write-Status -Type "SKIP" -Message "Уже установлен"
+        return
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: CapCut
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/b/ByteDance/CapCut
-# -----------------------------------------------------------------------------
+    Write-Status -Type "INFO" -Message "Устанавливаю через winget..."
 
-$packageId = "ByteDance.CapCut"
-$version = "8.5.0.3590"
-$installedName = "CapCut"
+    $args = @(
+        "install",
+        "--id", $App.Id,
+        "--exact",
+        "--source", $source,
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity"
+    )
 
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --architecture x64 `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($App.Version) {
+        $args += @("--version", $App.Version)
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: Chocolatey
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/c/Chocolatey/Chocolatey
-# -----------------------------------------------------------------------------
-
-$packageId = "Chocolatey.Chocolatey"
-$version = "2.7.1.0"
-$installedName = "Chocolatey"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type wix `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код: $LASTEXITCODE. Пропускаем..."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($App.InstallerType) {
+        $args += @("--installer-type", $App.InstallerType)
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: Discord
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/d/Discord/Discord
-# -----------------------------------------------------------------------------
-
-$packageId = "Discord.Discord"
-$installedName = "Discord"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --source winget `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-	if ($LASTEXITCODE -ne 0) {
-		Write-Warning "Ошибка установки $installedName. Код завершения работы winget: $LASTEXITCODE."
-	} else {
-		Write-Host "$installedName установлен успешно."
-	}
-}
-
-# -----------------------------------------------------------------------------
-# Приложение: Epic Games Launcher
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/e/EpicGames/EpicGamesLauncher
-# -----------------------------------------------------------------------------
-
-$packageId = "EpicGames.EpicGamesLauncher"
-$version = "1.3.161.0"
-$installedName = "Epic Games Launcher"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type wix `
-      --architecture x64 `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код завершения winget: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($App.Architecture) {
+        $args += @("--architecture", $App.Architecture)
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: Git
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Git/Git
-# -----------------------------------------------------------------------------
-
-$packageId = "Git.Git"
-$version = "2.54.0"
-$installedName = "Git"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type inno `
-      --architecture x64 `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-	if ($LASTEXITCODE -ne 0) {
-		Write-Warning "Ошибка установки $installedName. Код завершения работы winget: $LASTEXITCODE."
-	} else {
-		Write-Host "$installedName установлен успешно."
-	}
-}
-
-# -----------------------------------------------------------------------------
-# Приложение: Notepad++
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/n/Notepad%2B%2B/Notepad%2B%2B
-# -----------------------------------------------------------------------------
-
-$packageId = "Notepad++.Notepad++"
-$version = "8.9.2"
-$installedName = "Notepad++"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type wix `
-      --architecture x64 `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-	if ($LASTEXITCODE -ne 0) { 
-		Write-Warning "Ошибка установки $installedName. код завершения работы winget: $LASTEXITCODE."
-	} else { 
-		Write-Host "$installedName установлен успешно."
-	}
-}
-
-# -----------------------------------------------------------------------------
-# Приложение: Notion
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/n/Notion/Notion
-# -----------------------------------------------------------------------------
-
-$packageId = "Notion.Notion"
-$version = "7.9.0"
-$installedName = "Notion"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type nullsoft `
-      --architecture x64 `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код завершения winget: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($App.Scope) {
+        $args += @("--scope", $App.Scope)
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: Postman
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Postman/Postman
-# -----------------------------------------------------------------------------
-
-$packageId = "Postman.Postman"
-$version = "12.7.6"
-$installedName = "Postman"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --architecture x64 `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($App.Silent -ne $false) {
+        $args += "--silent"
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: qBittorrent
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/q/qBittorrent/qBittorrent
-# -----------------------------------------------------------------------------
-
-$packageId = "qBittorrent.qBittorrent"
-$version = "5.1.4"
-$installedName = "qBittorrent"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type nullsoft `
-      --architecture x64 `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-	if ($LASTEXITCODE -ne 0) {
-		Write-Warning "Ошибка установки $installedName. Код завершения работы winget: $LASTEXITCODE."
-	} else {
-		Write-Host "$installedName установлен успешно."
-	}
-}
-
-# -----------------------------------------------------------------------------
-# Приложение: Steam
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/v/Valve/Steam
-# -----------------------------------------------------------------------------
-
-$packageId = "Valve.Steam"
-$version = "2.10.91.91"
-$installedName = "Steam"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type nullsoft `
-      --scope machine `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код завершения winget: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($App.Custom) {
+        $args += @("--custom", $App.Custom)
     }
-}
 
-# -----------------------------------------------------------------------------
-# Приложение: Telegram Desktop
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/t/Telegram/TelegramDesktop
-# -----------------------------------------------------------------------------
+    $result = Invoke-WingetQuiet -Arguments $args
 
-$packageId = "Telegram.TelegramDesktop"
-$version = "6.7.8"
-$installedName = "Telegram Desktop"
-
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
-} else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --installer-type inno `
-      --architecture x64 `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Ошибка установки $installedName. Код завершения winget: $LASTEXITCODE. Пропускаем."
-    } else {
-        Write-Host "$installedName установлен успешно."
+    if ($result.ExitCode -ne 0) {
+        $script:FailedApps++
+        Write-Status -Type "WARN" -Message "Не удалось установить. Код winget: $($result.ExitCode). Подробности в логе."
+        return
     }
+
+    $script:InstalledApps++
+    Write-Status -Type "OK" -Message "Установлен успешно"
 }
 
 # -----------------------------------------------------------------------------
-# Приложение: Yandex Browser
-# Репозиторий: https://github.com/microsoft/winget-pkgs/tree/master/manifests/y/Yandex/Browser
+# Подготовка папки логов
 # -----------------------------------------------------------------------------
 
-$packageId = "Yandex.Browser"
-$version = "25.8.5.948"
-$installedName = "Yandex Browser"
+New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
 
-if (Test-AppInstalled -PackageId $packageId -InstalledName $installedName) {
-    Write-Host "$installedName уже установлен."
+# -----------------------------------------------------------------------------
+# Проверка окружения
+# -----------------------------------------------------------------------------
+
+Clear-Host
+Write-Host "Windows Setup Script" -ForegroundColor Cyan
+Write-Host "Лог winget: $script:LogFile" -ForegroundColor DarkGray
+
+Write-Section "Проверка окружения"
+
+$isAdmin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Status -Type "WARN" -Message "Скрипт нужно запускать от имени администратора."
+    Write-Host ""
+    Write-Host "Решение: ПКМ по setup.bat -> Запуск от имени администратора" -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Status -Type "OK" -Message "Права администратора есть"
+
+$wingetExists = Get-Command winget -ErrorAction SilentlyContinue
+if (-not $wingetExists) {
+    Write-Status -Type "WARN" -Message "winget не найден или не доступен в PATH."
+    Write-Host ""
+    Write-Host "Установи App Installer из Microsoft Store и перезапусти PowerShell." -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Status -Type "OK" -Message "winget найден"
+
+# -----------------------------------------------------------------------------
+# Настройки Проводника
+# -----------------------------------------------------------------------------
+
+Write-Section "Настройка Проводника"
+
+$explorerAdvanced = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+
+Set-ItemProperty -Path $explorerAdvanced -Name Hidden -Value 1
+Set-ItemProperty -Path $explorerAdvanced -Name HideFileExt -Value 0
+
+Stop-Process -Name explorer -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+Start-Process explorer.exe
+
+Write-Status -Type "OK" -Message "Скрытые файлы и расширения включены"
+
+# -----------------------------------------------------------------------------
+# Приложения
+# -----------------------------------------------------------------------------
+
+$apps = @(
+    @{
+        Name = "Bitwarden"
+        Id = "Bitwarden.Bitwarden"
+        Version = "2026.3.1"
+        InstallerType = "nullsoft"
+        Architecture = "x64"
+        Scope = "machine"
+        Custom = "/allusers"
+    },
+    @{
+        Name = "CapCut"
+        Id = "ByteDance.CapCut"
+        Version = "8.5.0.3590"
+        Architecture = "x64"
+    },
+    @{
+        Name = "Chocolatey"
+        Id = "Chocolatey.Chocolatey"
+        Version = "2.7.1.0"
+        InstallerType = "wix"
+        Scope = "machine"
+    },
+    @{
+        Name = "Discord"
+        Id = "Discord.Discord"
+    },
+    @{
+        Name = "Epic Games Launcher"
+        Id = "EpicGames.EpicGamesLauncher"
+        Version = "1.3.161.0"
+        InstallerType = "wix"
+        Architecture = "x64"
+        Scope = "machine"
+    },
+    @{
+        Name = "Git"
+        Id = "Git.Git"
+        Version = "2.54.0"
+        InstallerType = "inno"
+        Architecture = "x64"
+        Scope = "machine"
+    },
+    @{
+        Name = "Notepad++"
+        Id = "Notepad++.Notepad++"
+        Version = "8.9.2"
+        InstallerType = "wix"
+        Architecture = "x64"
+        Scope = "machine"
+    },
+    @{
+        Name = "Notion"
+        Id = "Notion.Notion"
+        Version = "7.9.0"
+        InstallerType = "nullsoft"
+        Architecture = "x64"
+    },
+    @{
+        Name = "Postman"
+        Id = "Postman.Postman"
+        Version = "12.7.6"
+        Architecture = "x64"
+    },
+    @{
+        Name = "qBittorrent"
+        Id = "qBittorrent.qBittorrent"
+        Version = "5.1.4"
+        InstallerType = "nullsoft"
+        Architecture = "x64"
+        Scope = "machine"
+    },
+    @{
+        Name = "Steam"
+        Id = "Valve.Steam"
+        Version = "2.10.91.91"
+        InstallerType = "nullsoft"
+        Scope = "machine"
+    },
+    @{
+        Name = "Telegram Desktop"
+        Id = "Telegram.TelegramDesktop"
+        Version = "6.7.8"
+        InstallerType = "inno"
+        Architecture = "x64"
+    },
+    @{
+        Name = "Yandex Browser"
+        Id = "Yandex.Browser"
+        Version = "25.8.5.948"
+        Architecture = "x64"
+        Custom = "--do-not-launch-browser"
+    },
+    @{
+        Name = "WhatsApp"
+        Id = "9NKSQGP7F2NH"
+        Source = "msstore"
+        Silent = $false
+    }
+)
+
+$script:TotalApps = $apps.Count
+
+Write-Section "Установка приложений"
+
+foreach ($app in $apps) {
+    Install-App -App $app
+}
+
+Write-Section "Готово"
+Write-Status -Type "OK" -Message ("Установлено: {0}" -f $script:InstalledApps)
+Write-Status -Type "SKIP" -Message ("Пропущено: {0}" -f $script:SkippedApps)
+
+if ($script:FailedApps -gt 0) {
+    Write-Status -Type "WARN" -Message ("Ошибки: {0}" -f $script:FailedApps)
 } else {
-    Write-Host "Установка $installedName..."
-
-    winget install `
-      --id $packageId `
-      --exact `
-      --version $version `
-      --source winget `
-      --architecture x64 `
-      --accept-package-agreements `
-      --accept-source-agreements `
-      --silent `
-      --custom "--do-not-launch-browser"
-
-	if ($LASTEXITCODE -ne 0) { 
-		Write-Warning "Ошибка установки $installedName. Код завершения работы winget: $LASTEXITCODE."
-	} else { 
-		Write-Host "$installedName установлен успешно."
-	}
+    Write-Status -Type "OK" -Message "Ошибок нет"
 }
 
-Write-Host "`nУстановка завершена.`n"
+Write-Host ""
+$logPath = $script:LogFile
+Write-Host ("Подробный лог: {0}" -f $logPath) -ForegroundColor DarkGray
